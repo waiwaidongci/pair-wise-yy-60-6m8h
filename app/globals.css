@@ -1,0 +1,14 @@
+:root {
+  color-scheme: light;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; min-width: 320px; background: #f2f5f3; }
+body { font-family: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif; }
+button, input, textarea { font: inherit; }
+a { color: inherit; text-decoration: none; }
+
+@media print {
+  .MuiDrawer-root, .MuiAppBar-root { display: none !important; }
+  main { padding-top: 0 !important; }
+}
