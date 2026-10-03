@@ -1,0 +1,5 @@
+node_modules/
+.next/
+.audit-data/
+*.tsbuildinfo
+.DS_Store
