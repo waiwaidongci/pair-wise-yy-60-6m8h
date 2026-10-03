@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
   Alert,
@@ -40,6 +40,7 @@ import {
   DashboardOutlined,
   FactCheckOutlined,
   FindInPageOutlined,
+  LinkOffOutlined,
   MenuOutlined,
   MoreHorizOutlined,
   NotificationsNoneOutlined,
@@ -49,6 +50,7 @@ import {
 } from '@mui/icons-material';
 import { fetchEvidence } from '@/lib/api';
 import { useCarbonStore } from '@/lib/store';
+import AuditChainPanel from '@/components/AuditChainPanel';
 
 const drawerWidth = 232;
 
@@ -63,11 +65,14 @@ export default function EvidenceWorkbench({ initialView }: { initialView: View }
   const [correctionReason, setCorrectionReason] = useState('');
   const { data, isLoading } = useQuery({ queryKey: ['carbon-api'], queryFn: fetchEvidence });
   const store = useCarbonStore();
+  const hydrate = useCarbonStore((s) => s.hydrate);
+  useEffect(() => { if (data) hydrate(data); }, [data, hydrate]);
   const selected = store.records.find((record) => record.id === store.selectedRecordId) ?? store.records[0];
   const visibleRecords = useMemo(() => recordFilter === '全部' ? store.records : store.records.filter((record) => record.status === recordFilter), [recordFilter, store.records]);
   const totalReduction = store.records.reduce((total, record) => total + record.activity * record.factor / (record.unit === 'kWh' ? 1000 : record.unit === 'L' ? 1000 : 1), 0);
   const openFindings = store.findings.filter((item) => item.status !== '已关闭');
   const allIssuanceChecked = Object.values(store.issuanceChecks).every(Boolean) && openFindings.length === 0;
+  const issuanceReady = allIssuanceChecked && store.chainValid;
 
   const nav = [
     { id: 'overview', label: '监测期总览', href: '/', icon: DashboardOutlined },
@@ -132,10 +137,30 @@ export default function EvidenceWorkbench({ initialView }: { initialView: View }
             </Box>
             <Stack direction="row" spacing={1}>
               <Button variant="outlined" startIcon={<CloudUploadOutlined />}>导入监测数据</Button>
-              <Button variant="contained" startIcon={<TaskAltOutlined />} disabled={view !== 'issuance' || !allIssuanceChecked}>提交签发准备</Button>
+              <Button variant="contained" startIcon={<TaskAltOutlined />} disabled={view !== 'issuance' || !issuanceReady || store.submitting} onClick={() => void store.submitIssuance()}>
+                {store.submitting ? '提交中…' : '提交签发准备'}
+              </Button>
             </Stack>
           </Stack>
           {isLoading && <LinearProgress />}
+
+          {!store.chainValid && store.chainBreakAt && (
+            <Alert severity="error" icon={<LinkOffOutlined />} sx={{ mb: 1.5 }}>
+              <Typography fontSize={13} fontWeight={700}>审计链出现断点，签发准备已立即失效</Typography>
+              <Typography fontSize={12} sx={{ mt: 0.3 }}>
+                断点：第 {store.chainBreakAt.seq} 号事件（{store.chainBreakAt.eventId}）。{store.chainBreakAt.reason}。请重新同步审计链后再提交签发准备。
+              </Typography>
+            </Alert>
+          )}
+
+          {store.conflicts.map((conflict) => (
+            <Alert key={conflict.operationId} severity="warning" sx={{ mb: 1.5 }} onClose={() => store.dismissConflict(conflict.operationId)}>
+              <Typography fontSize={12.5} fontWeight={700}>后到操作未成立（已留冲突）</Typography>
+              <Typography fontSize={12} sx={{ mt: 0.3 }}>
+                操作号 {conflict.operationId} 对 {conflict.entityType}:{conflict.entityId} 的 {conflict.action} 因版本不匹配被驳回（先到操作已成立）。
+              </Typography>
+            </Alert>
+          ))}
 
           {view === 'overview' && (
             <>
@@ -191,7 +216,7 @@ export default function EvidenceWorkbench({ initialView }: { initialView: View }
               <Card elevation={0} variant="outlined">
                 <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', sm: 'center' }} spacing={1} sx={{ p: 1.6 }}>
                   <Box><Typography fontWeight={800} fontSize={14}>证据矩阵与抽样任务</Typography><Typography fontSize={11} color="text.secondary">已抽取 {store.sampledIds.length} 条高价值记录</Typography></Box>
-                  <Stack direction="row" spacing={1}><Button variant="outlined" onClick={() => useCarbonStore.setState((state) => ({ sampledIds: store.records.filter((item) => Math.abs(item.anomaly) > 5).map((item) => item.id) }))}>按异常抽样</Button><Button variant="contained" onClick={store.batchVerify}>批量核验</Button></Stack>
+                  <Stack direction="row" spacing={1}><Button variant="outlined" onClick={() => useCarbonStore.setState((state) => ({ sampledIds: store.records.filter((item) => Math.abs(item.anomaly) > 5).map((item) => item.id) }))}>按异常抽样</Button><Button variant="contained" disabled={store.submitting} onClick={() => void store.batchVerify()}>批量核验</Button></Stack>
                 </Stack><Divider />
                 {store.records.map((record) => (
                   <Box key={record.id} sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: '22px minmax(210px, 1.3fr) .8fr .8fr .8fr auto' }, alignItems: 'center', gap: 1.2, px: 1.6, py: 1.3, borderTop: '1px solid #edf0ef' }}>
@@ -200,12 +225,12 @@ export default function EvidenceWorkbench({ initialView }: { initialView: View }
                     <Box><Typography variant="caption" color="text.secondary">来源</Typography><Typography fontSize={11}>原始计量记录</Typography></Box>
                     <Box><Typography variant="caption" color="text.secondary">单位</Typography><Typography fontSize={11}>{record.unit} / {record.factorUnit}</Typography></Box>
                     <Box><Typography variant="caption" color="text.secondary">时间范围</Typography><Typography fontSize={11}>{record.timeRange.includes('至') ? '已覆盖整期' : '待检查'}</Typography></Box>
-                    <Stack direction="row" spacing={.7}><Button size="small" variant="outlined" onClick={() => store.startCorrection(record.id)}>复核</Button><Button size="small" variant="contained" disabled={record.status === '需补证'} onClick={() => store.verifyRecord(record.id)}>通过</Button></Stack>
+                    <Stack direction="row" spacing={.7}><Button size="small" variant="outlined" disabled={store.submitting} onClick={() => void store.startCorrection(record.id)}>复核</Button><Button size="small" variant="contained" disabled={record.status === '需补证' || store.submitting} onClick={() => void store.verifyRecord(record.id)}>通过</Button></Stack>
                   </Box>
                 ))}
               </Card>
               <Stack spacing={1.5}>
-                <Card elevation={0} variant="outlined"><CardContent><Typography fontWeight={800} fontSize={14} mb={1.3}>发现项闭环</Typography>{store.findings.map((finding) => <Box key={finding.id} sx={{ borderTop: '1px solid #edf0ef', py: 1.2 }}><Stack direction="row" justifyContent="space-between"><Typography fontSize={12} fontWeight={700}>{finding.title}</Typography><Chip size="small" label={finding.status} color={finding.status === '已关闭' ? 'success' : finding.status === '补证中' ? 'warning' : 'error'} /></Stack><Typography fontSize={10.5} color="text.secondary" mt={.5}>{finding.detail}</Typography><Stack direction="row" spacing={.7} mt={1}><Button size="small" disabled={finding.status === '已关闭'} onClick={() => store.requestEvidence(finding.id)}>发起补证</Button><Button size="small" disabled={finding.status === '已关闭'} onClick={() => store.closeFinding(finding.id)}>关闭</Button></Stack></Box>)}</CardContent></Card>
+                <Card elevation={0} variant="outlined"><CardContent><Typography fontWeight={800} fontSize={14} mb={1.3}>发现项闭环</Typography>{store.findings.map((finding) => <Box key={finding.id} sx={{ borderTop: '1px solid #edf0ef', py: 1.2 }}><Stack direction="row" justifyContent="space-between"><Typography fontSize={12} fontWeight={700}>{finding.title}</Typography><Chip size="small" label={finding.status} color={finding.status === '已关闭' ? 'success' : finding.status === '补证中' ? 'warning' : 'error'} /></Stack><Typography fontSize={10.5} color="text.secondary" mt={.5}>{finding.detail}</Typography><Stack direction="row" spacing={.7} mt={1}><Button size="small" disabled={finding.status === '已关闭' || store.submitting} onClick={() => void store.requestEvidence(finding.id)}>发起补证</Button><Button size="small" disabled={finding.status === '已关闭' || store.submitting} onClick={() => void store.closeFinding(finding.id)}>关闭</Button></Stack></Box>)}</CardContent></Card>
                 <Alert severity="info">任何数据修订都会生成新版本，原始提交和计算链不会被覆盖。</Alert>
               </Stack>
             </Box>
@@ -228,7 +253,14 @@ export default function EvidenceWorkbench({ initialView }: { initialView: View }
               <Stack spacing={1.5}>
                 <Card elevation={0} variant="outlined"><CardContent><Typography fontWeight={800} fontSize={14}>签发就绪度</Typography><Stack direction="row" alignItems="baseline" spacing={1} mt={1}><Typography variant="h4" fontWeight={850}>{Math.round(Object.values(store.issuanceChecks).filter(Boolean).length / 4 * 70 + (openFindings.length === 0 ? 30 : 0))}%</Typography><Typography fontSize={11} color="text.secondary">完成度</Typography></Stack><LinearProgress variant="determinate" value={Object.values(store.issuanceChecks).filter(Boolean).length / 4 * 100} sx={{ height: 7, borderRadius: 3, mt: 1 }} /><Typography fontSize={11} color="text.secondary" mt={1.2}>还有 {openFindings.length} 个开放发现项。</Typography></CardContent></Card>
                 <Card elevation={0} variant="outlined"><CardContent><Stack direction="row" justifyContent="space-between"><Typography fontWeight={800} fontSize={14}>版本与核验意见</Typography><IconButton size="small"><MoreHorizOutlined /></IconButton></Stack>{[['V4', '韩跃', '修订柴油活动数据并补充测试运行说明'], ['V3', '沈楠', '要求补充流量计校准证据'], ['V2', '徐璐', '统一电量单位并附原始记录']].map((item) => <Stack key={item[0]} direction="row" spacing={1.2} sx={{ borderTop: '1px solid #edf0ef', py: 1.2 }}><Chip size="small" label={item[0]} /><Box><Typography fontSize={11.5} fontWeight={700}>{item[1]}</Typography><Typography fontSize={10.5} color="text.secondary">{item[2]}</Typography></Box></Stack>)}</CardContent></Card>
-                <Alert severity={allIssuanceChecked ? 'success' : 'warning'}>{allIssuanceChecked ? '全部门禁已完成，可提交签发准备。' : '关闭开放发现项并完成所有检查后可提交。'}</Alert>
+                <Card elevation={0} variant="outlined"><CardContent><AuditChainPanel /></CardContent></Card>
+                <Alert severity={issuanceReady ? 'success' : 'warning'}>
+                  {issuanceReady
+                    ? '全部门禁已完成，审计链有效，可提交签发准备。'
+                    : !store.chainValid
+                      ? '审计链存在断点，签发准备已立即失效，请重新同步审计链后再提交。'
+                      : '关闭开放发现项并完成所有检查后可提交。'}
+                </Alert>
               </Stack>
             </Box>
           )}
@@ -244,7 +276,7 @@ export default function EvidenceWorkbench({ initialView }: { initialView: View }
             <TextField fullWidth size="small" label={`修订值 / ${selected.unit}`} value={correctionValue} onChange={(event) => setCorrectionValue(event.target.value)} margin="normal" />
             <TextField fullWidth size="small" label="修订原因" multiline rows={3} value={correctionReason} onChange={(event) => setCorrectionReason(event.target.value)} margin="normal" />
             {!correctionReason.trim() && <Alert severity="warning">必须填写修订原因。</Alert>}
-            <Stack direction="row" spacing={1} justifyContent="flex-end" mt={2}><Button onClick={() => setCorrectionOpen(false)}>取消</Button><Button variant="contained" disabled={!correctionReason.trim() || !Number(correctionValue)} onClick={() => { store.reviseValue(selected.id, Number(correctionValue), correctionReason); setCorrectionOpen(false); setCorrectionReason(''); }}>生成新版本</Button></Stack>
+            <Stack direction="row" spacing={1} justifyContent="flex-end" mt={2}><Button onClick={() => setCorrectionOpen(false)}>取消</Button><Button variant="contained" disabled={!correctionReason.trim() || !Number(correctionValue) || store.submitting} onClick={() => { void store.reviseValue(selected.id, Number(correctionValue), correctionReason); setCorrectionOpen(false); setCorrectionReason(''); }}>生成新版本</Button></Stack>
           </CardContent></Card>
         </Box>
       )}
